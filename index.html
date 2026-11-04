@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบสแกนคะแนนนักศึกษา</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 10px; background: #f4f4f9; }
+        video { width: 100%; max-width: 400px; border: 2px solid #333; border-radius: 8px; }
+        button { padding: 12px 24px; font-size: 16px; margin: 10px; cursor: pointer; border-radius: 5px; border: none; color: white; }
+        .btn-scan { background-color: #007bff; }
+        .btn-save { background-color: #28a745; display: none; }
+        #result { margin-top: 15px; text-align: left; max-width: 400px; margin-left: auto; margin-right: auto; background: white; padding: 10px; border-radius: 8px; }
+        .loading { color: orange; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>สแกนใบคะแนน</h2>
+    <!-- หน้าจอกล้อง -->
+    <video id="camera" autoplay playsinline></video>
+    <br>
+    <button class="btn-scan" onclick="captureAndScan()">📸 สแกนคะแนน</button>
+    
+    <!-- พื้นที่แสดงผลก่อนบันทึก -->
+    <div id="status"></div>
+    <div id="result"></div>
+    <button id="saveBtn" class="btn-save" onclick="saveToSheet()">💾 ยืนยันและบันทึกลง Sheet</button>
+
+    <!-- Canvas ซ่อนไว้ใช้ดึงภาพจากกล้อง (ไม่บันทึกลงเครื่อง) -->
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script>
+        // ======= ใส่ค่าของคุณตรงนี้ =======
+        const GEMINI_API_KEY = "AQ.Ab8RN6J0HsOyTFMU1pazQHwavqX6HEeJIJeLuzuYgjdHvYxddw";
+        const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbzpsXCIhcS22W1b3XlTzQy6bKveLXf6sZCb19gXA_W-ROdElsVKRcOMBmKfeoH3uKH0/exec";
+        // ===============================
+
+        const video = document.getElementById('camera');
+        const canvas = document.getElementById('canvas');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+        const saveBtn = document.getElementById('saveBtn');
+        let scannedData = null;
+
+        // 1. เปิดกล้องหลังของมือถืออัตโนมัติ
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+            .then(stream => { video.srcObject = stream; })
+            .catch(err => { alert("ไม่สามารถเปิดกล้องได้: " + err); });
+
+        // 2. ฟังก์ชันจับภาพและส่งให้ AI อ่าน
+        async function captureAndScan() {
+            statusDiv.innerHTML = "<p class='loading'>⏳ กำลังประมวลผลภาพ...</p>";
+            resultDiv.innerHTML = "";
+            saveBtn.style.display = "none";
+
+            // ดึงภาพจากวิดีโอลง Canvas
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            
+            // แปลงภาพเป็นข้อความ Base64 (เพื่อส่งผ่านเน็ตโดยไม่ต้องเซฟไฟล์)
+            const base64Image = canvas.toDataURL('image/jpeg').split(',')[1];
+
+            // คำสั่งบอก AI
+            const prompt = `นี่คือใบคะแนน อ่านค่าแล้วตอบกลับเป็น JSON เท่านั้น โครงสร้างดังนี้:
+            { "lab": "ชื่อการทดลอง", "students": [ {"id": "รหัสนักศึกษา", "score": คะแนนที่ถูกฝนดำทึบ(0,2,4,6,8,10)} ] }
+            ห้ามมีข้อความอื่นนอกจาก JSON`;
+
+            try {
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [ { text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64Image } } ] }]
+                    })
+                });
+
+                const data = await response.json();
+                let aiText = data.candidates[0].content.parts[0].text;
+                
+                // ล้างข้อความเผื่อ AI ใส่เครื่องหมาย ```json มาด้วย
+                aiText = aiText.replace(/```json/g, "").replace(/```/g, "").trim();
+                scannedData = JSON.parse(aiText);
+
+                // แสดงผลให้ตรวจสอบ
+                statusDiv.innerHTML = "✅ อ่านข้อมูลสำเร็จ กรุณาตรวจสอบ:";
+                let html = `<b>การทดลอง:</b> ${scannedData.lab}<ul>`;
+                scannedData.students.forEach(s => {
+                    html += `<li>รหัส: ${s.id} ➡️ ได้ <b>${s.score}</b> คะแนน</li>`;
+                });
+                html += "</ul>";
+                resultDiv.innerHTML = html;
+                saveBtn.style.display = "inline-block";
+
+            } catch (error) {
+                statusDiv.innerHTML = "❌ เกิดข้อผิดพลาดในการอ่านภาพ ลองถ่ายใหม่อีกครั้ง";
+                console.error(error);
+            }
+        }
+
+        // 3. ฟังก์ชันส่งข้อมูลเข้า Google Sheet
+        function saveToSheet() {
+            if(!scannedData) return;
+            statusDiv.innerHTML = "<p class='loading'>⏳ กำลังบันทึกลง Google Sheet...</p>";
+            saveBtn.style.display = "none";
+
+            fetch(GOOGLE_SHEET_URL, {
+                method: 'POST',
+                mode: 'no-cors', // สำคัญมากสำหรับการส่งเข้า Google Script
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(scannedData)
+            }).then(() => {
+                statusDiv.innerHTML = "🎉 <b>บันทึกข้อมูลเรียบร้อยแล้ว!</b>";
+                resultDiv.innerHTML = "";
+            }).catch(err => {
+                statusDiv.innerHTML = "❌ บันทึกไม่สำเร็จ";
+            });
+        }
+    </script>
+</body>
+</html>
