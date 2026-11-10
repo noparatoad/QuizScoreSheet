@@ -57,39 +57,49 @@
     const statusText = document.getElementById('status');
     let scannedData = null;
 
-    // 1. เปิดกล้องมือถือ (ใช้กล้องหลัง)
+        // 1. เปิดกล้องมือถือ (ใช้กล้องหลัง)
     navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
       .then(stream => { video.srcObject = stream; })
       .catch(err => { alert("ไม่สามารถเปิดกล้องได้: " + err); });
 
-    // 2. ฟังก์ชันถ่ายภาพและส่งให้ AI อ่าน
+    // 2. ฟังก์ชันถ่ายภาพและส่งให้ AI อ่าน (ปรับปรุงใหม่)
     async function scanSheet() {
       statusText.innerText = "⏳ กำลังอ่านข้อมูลจากใบคะแนน รอสักครู่...";
       
-      // ดึงภาพจากวิดีโอลง Canvas (ไม่ต้องเซฟลงเครื่อง)
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0);
-      
-      // แปลงภาพเป็น Base64 เพื่อส่งผ่านเน็ต
-      const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-
-      // คำสั่ง (Prompt) บอกให้ AI รู้จักคำว่า "ขาดสอบ"
-      const prompt = `
-        อ่านข้อมูลจากใบบันทึกคะแนนนี้ และตอบกลับมาเป็น JSON เท่านั้น โครงสร้างดังนี้:
-        {
-          "lab": "ชื่อการทดลองที่อยู่หัวกระดาษ (เช่น Lab 1)",
-          "students": [
-            {"id": "รหัสนักศึกษา", "score": คะแนน}
-          ]
-        }
-        กฎการอ่านคะแนน:
-        1. คะแนนจะมีตัวเลือก 0, 2, 4, 6, 8, 10 ช่องไหนถูกฝนทึบสีดำ ให้เอาตัวเลขนั้นเป็นคะแนน (เป็นตัวเลข Number)
-        2. หากแถวของนักศึกษาคนใด "ไม่มีการฝนทึบเลย" หรือ "ถูกฝนทึบที่ช่องคำว่า ขาด" ให้ใส่ค่า score เป็นข้อความว่า "ขาดสอบ"
-      `;
-
       try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+        // เช็กว่ากล้องพร้อมหรือยัง
+        if (!video.videoWidth) {
+          throw new Error("กล้องยังไม่พร้อมทำงาน กรุณารอสักครู่แล้วกดใหม่");
+        }
+
+        // [แก้ไข 1] ย่อขนาดภาพลงให้กว้างไม่เกิน 800px (ช่วยให้ส่งไวขึ้นมากและไม่พัง)
+        const MAX_WIDTH = 800;
+        const scale = MAX_WIDTH / video.videoWidth;
+        canvas.width = MAX_WIDTH;
+        canvas.height = video.videoHeight * scale;
+        
+        // วาดภาพที่ย่อแล้วลง Canvas
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        // แปลงภาพเป็น Base64 (บีบอัดคุณภาพเหลือ 70%)
+        const base64Image = canvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+
+        const prompt = `
+          อ่านข้อมูลจากใบบันทึกคะแนนนี้ และตอบกลับมาเป็น JSON เท่านั้น โครงสร้างดังนี้:
+          {
+            "lab": "ชื่อการทดลองที่อยู่หัวกระดาษ (เช่น Lab 1)",
+            "students": [
+              {"id": "รหัสนักศึกษา", "score": คะแนน}
+            ]
+          }
+          กฎการอ่านคะแนน:
+          1. คะแนนจะมีตัวเลือก 0, 2, 4, 6, 8, 10 ช่องไหนถูกฝนทึบสีดำ ให้เอาตัวเลขนั้นเป็นคะแนน (เป็นตัวเลข Number)
+          2. หากแถวของนักศึกษาคนใด "ไม่มีการฝนทึบเลย" หรือ "ถูกฝนทึบที่ช่องคำว่า ขาด" ให้ใส่ค่า score เป็นข้อความว่า "ขาดสอบ"
+        `;
+
+        // ส่งข้อมูลไปให้ Gemini (ตัดช่องว่างหน้า-หลัง API Key ออกให้ด้วยเผื่อก๊อปปี้ติดมา)
+        const cleanApiKey = GEMINI_API_KEY.trim();
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${cleanApiKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -104,7 +114,18 @@
         });
 
         const result = await response.json();
-        const jsonText = result.candidates[0].content.parts[0].text;
+
+        // เช็กว่า API Key ผิด หรือมีปัญหาจากฝั่ง Google หรือไม่
+        if (!response.ok) {
+          throw new Error(result.error?.message || "เชื่อมต่อ AI ไม่สำเร็จ");
+        }
+
+        // ดึงข้อความที่ AI ตอบกลับมา
+        let jsonText = result.candidates[0].content.parts[0].text;
+        
+        // [แก้ไข 2] ล้างเครื่องหมาย ```json ที่อาจจะติดมาออกก่อนแปลงค่า
+        jsonText = jsonText.replace(/```json/g, "").replace(/```/g, "").trim();
+        
         scannedData = JSON.parse(jsonText);
 
         // แสดงผลลัพธ์ให้คนตรวจเช็กก่อน
@@ -112,25 +133,28 @@
         statusText.innerText = "";
 
       } catch (error) {
-        statusText.innerText = "❌ เกิดข้อผิดพลาดในการอ่านภาพ กรุณาถ่ายใหม่อีกครั้ง";
+        // แสดงสาเหตุที่แท้จริงออกมาบนหน้าจอเลย จะได้รู้ว่าติดตรงไหน
+        statusText.innerText = "❌ ผิดพลาด: " + error.message;
         console.error(error);
       }
     }
 
     // 3. แสดงตารางสรุปผลบนหน้าจอมือถือ
     function showPreview(data) {
-      document.getElementById('labName').innerText = data.lab;
+      document.getElementById('labName').innerText = data.lab || "ไม่ระบุ";
       const tbody = document.getElementById('scoreTable');
       tbody.innerHTML = "";
 
-      data.students.forEach(st => {
-        const isAbsent = st.score === "ขาดสอบ";
-        const row = `<tr>
-          <td>${st.id}</td>
-          <td class="${isAbsent ? 'absent' : ''}">${st.score}</td>
-        </tr>`;
-        tbody.innerHTML += row;
-      });
+      if (data.students && Array.isArray(data.students)) {
+        data.students.forEach(st => {
+          const isAbsent = st.score === "ขาดสอบ";
+          const row = `<tr>
+            <td>${st.id}</td>
+            <td class="${isAbsent ? 'absent' : ''}">${st.score}</td>
+          </tr>`;
+          tbody.innerHTML += row;
+        });
+      }
 
       video.style.display = "none";
       document.querySelector('.btn-scan').style.display = "none";
@@ -143,14 +167,16 @@
       
       fetch(GOOGLE_SHEET_URL, {
         method: 'POST',
-        mode: 'no-cors', // สำคัญสำหรับการส่งเข้า Google Script
-        headers: { 'Content-Type': 'application/json' },
+        mode: 'no-cors',
+        // [แก้ไข 3] ต้องใช้ text/plain เพื่อไม่ให้เบราว์เซอร์บล็อกตอนใช้โหมด no-cors
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, 
         body: JSON.stringify(scannedData)
       }).then(() => {
         alert("✅ บันทึกข้อมูลเรียบร้อยแล้ว!");
         resetScan();
       }).catch(err => {
         alert("เกิดข้อผิดพลาดในการบันทึก: " + err);
+        statusText.innerText = "";
       });
     }
 
